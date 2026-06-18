@@ -41,7 +41,16 @@ _COLOR_MANUAL   = (50, 205,  50)   # lime green  (BGR)
 _COLOR_PROPOSAL = (0,  215, 255)   # gold        (BGR)
 _COLOR_ACTIVE   = (255, 100,  50)  # blue while dragging (BGR)
 _WINDOW = "Annotate - trash bin detection"
-_MAX_DISPLAY = 1280  # max pixels in either dimension when displaying
+
+
+def _screen_size() -> tuple[int, int]:
+    """Primary monitor resolution, used to scale images for fullscreen display."""
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        return u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+    except Exception:
+        return 1920, 1080
 
 
 class _SessionStats:
@@ -87,48 +96,56 @@ class _DrawState:
 
     def __init__(self, image: np.ndarray) -> None:
         orig_h, orig_w = image.shape[:2]
-        self.scale = min(_MAX_DISPLAY / max(orig_h, orig_w), 1.0)
-        if self.scale < 1.0:
-            dw = int(orig_w * self.scale)
-            dh = int(orig_h * self.scale)
-            self.image = cv2.resize(image, (dw, dh), interpolation=cv2.INTER_AREA)
-        else:
-            self.image = image.copy()
-        self.boxes: list[tuple[int, int, int, int]] = []  # confirmed (x1,y1,x2,y2) in display coords
+        sw, sh = _screen_size()
+        self.scale = min(sw / orig_w, sh / orig_h)
+        fw = int(orig_w * self.scale)
+        fh = int(orig_h * self.scale)
+        interp = cv2.INTER_AREA if self.scale < 1.0 else cv2.INTER_LINEAR
+        resized = cv2.resize(image, (fw, fh), interpolation=interp)
+        # Centre image on a black canvas that exactly matches the screen
+        self._pad_x = (sw - fw) // 2
+        self._pad_y = (sh - fh) // 2
+        canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
+        canvas[self._pad_y:self._pad_y + fh, self._pad_x:self._pad_x + fw] = resized
+        self.image = canvas
+        self.boxes: list[tuple[int, int, int, int]] = []  # in scaled non-padded coords
         self._drawing = False
         self._x0 = self._y0 = self._x1 = self._y1 = 0
 
     def mouse_callback(self, event: int, x: int, y: int,
                        flags: int, param: object) -> None:
+        # Subtract padding so internal coords are relative to the image, not the canvas
+        ix, iy = x - self._pad_x, y - self._pad_y
         if event == cv2.EVENT_LBUTTONDOWN:
             self._drawing = True
-            self._x0, self._y0, self._x1, self._y1 = x, y, x, y
+            self._x0, self._y0, self._x1, self._y1 = ix, iy, ix, iy
         elif event == cv2.EVENT_MOUSEMOVE and self._drawing:
-            self._x1, self._y1 = x, y
+            self._x1, self._y1 = ix, iy
         elif event == cv2.EVENT_LBUTTONUP and self._drawing:
             self._drawing = False
-            x1, y1 = min(self._x0, x), min(self._y0, y)
-            x2, y2 = max(self._x0, x), max(self._y0, y)
+            x1, y1 = min(self._x0, ix), min(self._y0, iy)
+            x2, y2 = max(self._x0, ix), max(self._y0, iy)
             if x2 - x1 > 5 and y2 - y1 > 5:
                 self.boxes.append((x1, y1, x2, y2))
 
     def render(self, proposals: Optional[list[tuple[int, int, int, int]]] = None) -> np.ndarray:
         frame = self.image.copy()
+        px, py = self._pad_x, self._pad_y
         if proposals:
-            for x1, y1, x2, y2 in proposals:
+            for x1, y1, x2, y2 in proposals:  # already in padded canvas coords
                 cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_PROPOSAL, 2)
-                cv2.putText(frame, "YOLO", (x1, max(y1 - 6, 14)),
+                cv2.putText(frame, "YOLO", (x1, max(y1 - 6, py + 14)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, _COLOR_PROPOSAL, 1)
-        for x1, y1, x2, y2 in self.boxes:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), 4)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_MANUAL, 2)
+        for x1, y1, x2, y2 in self.boxes:  # stored without padding → add it back
+            cv2.rectangle(frame, (x1+px, y1+py), (x2+px, y2+py), (0, 0, 0), 4)
+            cv2.rectangle(frame, (x1+px, y1+py), (x2+px, y2+py), _COLOR_MANUAL, 2)
         if self._drawing:
             x1 = min(self._x0, self._x1)
             y1 = min(self._y0, self._y1)
             x2 = max(self._x0, self._x1)
             y2 = max(self._y0, self._y1)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), 4)        # svart kontur
-            cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_ACTIVE, 2)    # farge oppå
+            cv2.rectangle(frame, (x1+px, y1+py), (x2+px, y2+py), (0, 0, 0), 4)
+            cv2.rectangle(frame, (x1+px, y1+py), (x2+px, y2+py), _COLOR_ACTIVE, 2)
         return frame
 
 
@@ -179,8 +196,9 @@ def _run_manual(image_path: Path, image: np.ndarray) -> str:
     Returns 'next' or 'quit'.
     """
     orig_h, orig_w = image.shape[:2]
-    state = _DrawState(image)  # scales image to fit _MAX_DISPLAY
-    cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)  # AUTOSIZE: window = image = no coord mismatch
+    state = _DrawState(image)  # scales image to fill screen
+    cv2.namedWindow(_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(_WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.setMouseCallback(_WINDOW, state.mouse_callback)
 
     _HELP_NORMAL  = "Draw box | s/Enter: save+next | b: no bin here | z: undo | c: clear | Esc: skip | q: quit"
@@ -249,16 +267,18 @@ def _run_assisted(image_path: Path, image: np.ndarray,
     Returns 'next' or 'quit'.
     """
     orig_h, orig_w = image.shape[:2]
-    draw_state  = _DrawState(image)  # scales image to fit _MAX_DISPLAY
+    draw_state  = _DrawState(image)  # scales image to fill screen
     manual_mode = False
     confirm_bg  = False
-    # Scale YOLO proposals (original image coords) into display coords for rendering
+    # Scale YOLO proposals (original image coords) into padded canvas coords for rendering
+    px, py = draw_state._pad_x, draw_state._pad_y
     disp_proposals = [
-        (int(x1 * draw_state.scale), int(y1 * draw_state.scale),
-         int(x2 * draw_state.scale), int(y2 * draw_state.scale))
+        (int(x1 * draw_state.scale) + px, int(y1 * draw_state.scale) + py,
+         int(x2 * draw_state.scale) + px, int(y2 * draw_state.scale) + py)
         for x1, y1, x2, y2 in proposals
     ]
-    cv2.namedWindow(_WINDOW, cv2.WINDOW_AUTOSIZE)  # AUTOSIZE: window = image = no coord mismatch
+    cv2.namedWindow(_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(_WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     _HELP_WITH    = (f"{len(proposals)} proposal(s) | "
                      "a/Enter: accept | b: no bin here | r: redraw | s: skip | q: quit")
