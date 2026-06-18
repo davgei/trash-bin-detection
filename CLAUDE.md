@@ -7,6 +7,51 @@
   scaffolding for future phases unless explicitly asked.
 - Before starting a non-trivial implementation, confirm the approach with the user.
 
+## Environment and Tooling
+
+**Python interpreter — read this first.** All project dependencies (`ultralytics`, `torch`,
+`opencv-python`, `numpy`) are installed in the **global Python 3.14**, *not* in `.venv`.
+The local `.venv/` exists but is empty (only `pip`), so `.venv/Scripts/python.exe` will
+fail with `ModuleNotFoundError`. Run every command with the `py` launcher:
+
+```
+py -3.14 -m src.train
+py -3.14 -m src.prepare_dataset
+py -3.14 -m src.evaluate
+```
+
+To locate the interpreter that actually has the packages (do not assume `.venv`):
+```
+py -0p                                              # list installed Pythons
+py -3.14 -c "import ultralytics; print(ultralytics.__file__)"
+```
+
+**Where trained weights live.** `src/train.py` passes `project="models/trained"`, but
+Ultralytics prepends `runs/detect/`, so weights are actually saved to:
+
+```
+runs/detect/models/trained/<run-name>/weights/best.pt
+```
+
+**Dataset layout and annotation flow.**
+
+```
+data/to_annotate/       ← drop new images here before annotating
+data/annotated_backup/  ← master pool (source of truth); never delete
+data/annotated/         ← active train/val/test split read by training/eval
+data/raw/               ← original source material (videos, GPS) — NOT annotation queue
+```
+
+Full flow for adding new images:
+1. Copy new images into `data/to_annotate/`
+2. `py -3.14 -m src.labeling.annotate [--mode assisted --model <weights>]`
+   - draws boxes, saves `.txt` labels alongside images in `to_annotate/`
+   - at session end: exports to pool (`annotated_backup/`) and rebuilds `data/annotated/`
+3. Training reads from `data/annotated/` via `configs/data.yaml`
+
+To rebuild `data/annotated/` manually (e.g. after changing split fractions):
+`py -3.14 -m src.prepare_dataset`
+
 ## Code Quality
 
 - Use type hints in all Python functions and method signatures.
@@ -72,6 +117,26 @@ annotate 10–20 images manually
 
 Each iteration should improve proposal quality. Stop when the model proposes boxes that
 rarely need correction.
+
+### Hard Example Mining (oversampling)
+
+Images the model previously misclassified are intentionally **duplicated** in the training
+set so the model trains on them several times. These hard examples are stored as exact,
+byte-identical copies with a `_h2`, `_h3`, `_h4` … suffix on the filename, e.g.
+`Skjermbilde 2026-06-17 145926.png`, `..._h2.png`, `..._h3.png`, `..._h4.png`.
+
+This imposes two hard rules on dataset splitting:
+- **All copies of a duplicated image must stay in the training split.** Duplicates must
+  never appear in val or test.
+- **val and test must contain only single-copy images** — distinct images that appear
+  nowhere else — so evaluation stays honest (no train/val/test leakage).
+
+`src/prepare_dataset.py` enforces this. It groups images by **content hash** (md5 of the
+file, not filename), locks any content that appears more than once into `train`, and splits
+the single-copy images into train/val/test. It then verifies content-level disjointness and
+preserves the duplicate count (the oversampling signal stays intact). **Always re-split with
+this script — never split by filename**, because the duplicate copies have different names
+but identical content, so a filename-based split silently leaks them across splits.
 
 ## Explaining Changes
 

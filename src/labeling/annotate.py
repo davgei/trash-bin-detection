@@ -437,8 +437,23 @@ def main() -> None:
         pct = int(stats.correct / stats.total * 100)
         print(f"\nYOLO accuracy this session: {stats.correct}/{stats.total} ({pct}%)")
 
-    print("\nExporting labels to data/annotated/ ...")
+    print("\nExporting labels to pool (data/annotated_backup/) ...")
     export_labels()
+
+    print("\nRebuilding train/val/test splits ...")
+    from src.prepare_dataset import (
+        group_pairs_by_content, partition, clear_split_dirs,
+        write_splits, verify_no_content_leak, ANNOTATED_DIR, BACKUP_DIR, SPLITS, IMAGE_SUFFIXES,
+    )
+    groups = group_pairs_by_content(BACKUP_DIR)
+    splits = partition(groups, val_frac=0.2, test_frac=0.2, seed=0)
+    clear_split_dirs(ANNOTATED_DIR)
+    write_splits(ANNOTATED_DIR, splits)
+    verify_no_content_leak(ANNOTATED_DIR)
+    for split in SPLITS:
+        on_disk = sum(1 for p in (ANNOTATED_DIR / "images" / split).iterdir()
+                      if p.suffix.lower() in IMAGE_SUFFIXES)
+        print(f"  {split:5s}: {on_disk} files")
     print("Done.")
 
 
