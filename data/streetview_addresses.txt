@@ -1,0 +1,5 @@
+# Gateadresser for Street View-bilder
+# Én adresse per linje. Linjer som starter med # ignoreres.
+# Adressen slettes automatisk fra filen etter at bildet er hentet.
+#
+# Eksempel:
