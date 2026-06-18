@@ -20,6 +20,7 @@ def train(
     imgsz: int = 640,
     batch: int = 8,
     run_name: str = "run",
+    patience: int = 10,
 ) -> Path:
     """
     Fine-tunes a pretrained YOLO model on data/annotated/.
@@ -39,6 +40,7 @@ def train(
         epochs=epochs,
         imgsz=imgsz,
         batch=batch,
+        patience=patience,
         project=str(MODELS_DIR),
         name=run_name,
     )
@@ -62,6 +64,8 @@ def main() -> None:
                         help="Batch size (default: 8)")
     parser.add_argument("--name", type=str, default="run",
                         help="Name for this training run (default: run)")
+    parser.add_argument("--patience", type=int, default=20,
+                        help="Early stopping: epochs without improvement before stopping (default: 10)")
     args = parser.parse_args()
 
     train(
@@ -70,6 +74,7 @@ def main() -> None:
         imgsz=args.imgsz,
         batch=args.batch,
         run_name=args.name,
+        patience=args.patience,
     )
 
 
