@@ -14,9 +14,6 @@ data/annotated/
 data/annotated_backup/
 data/pointclouds/
 
-models/pretrained/
-models/trained/
-
 outputs/
 
 *.pt
@@ -26,6 +23,8 @@ outputs/
 *.bin
 *.pcd
 *.ply
+
+!**/best.pt
 
 *.jpg
 *.jpeg
