@@ -1,27 +1,25 @@
 ﻿"""
-Exports verified image-label pairs from data/to_annotate/ into the final
-dataset structure under data/annotated/, split into train / val / test.
-
-Only images that have a matching .txt label file are exported.
-Existing files in data/annotated/ are NOT overwritten.
+Exports verified image-label pairs from data/to_annotate/ into the master pool
+(data/annotated_backup/images/train and labels/train).
 
 Hard examples (images where YOLO was wrong during assisted annotation) are
-duplicated N extra times in the train split so YOLO sees them more often.
+duplicated N extra times in the pool so YOLO sees them more often in training.
+
+After export, prepare_dataset.py rebuilds the active train/val/test split from
+the pool using content-hash deduplication and hard-example-aware splitting.
 
 Run from the project root:
     python -m src.labeling.export_labels
-    python -m src.labeling.export_labels --split 0.8 0.1 0.1
     python -m src.labeling.export_labels --hard-repeat 4
 """
 
 import argparse
 import json
-import random
 import shutil
 from pathlib import Path
 
 TO_ANNOTATE_DIR = Path("data/to_annotate")
-ANNOTATED_DIR   = Path("data/annotated")
+POOL_DIR        = Path("data/annotated_backup")   # master pool; prepare_dataset.py splits from here
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
@@ -48,114 +46,86 @@ def _is_hard_example(img: Path) -> bool:
         return False
 
 
-def _copy_hard_duplicates(img: Path, label: Path, split: str, repeat: int) -> int:
+def _copy_to_pool(img: Path, label: Path, repeat: int) -> tuple[int, int]:
     """
-    Copies the image and label `repeat` extra times into the train split,
-    with _h2, _h3 … suffixes. Returns the number of copies actually written.
+    Copies image+label into POOL_DIR/images/train and POOL_DIR/labels/train.
+    Hard examples (repeat > 0) are duplicated with _h2, _h3 … suffixes.
+    Returns (base_copied, hard_copies_written).
     """
-    written = 0
-    for n in range(2, repeat + 2):
-        dst_img   = ANNOTATED_DIR / "images" / split / f"{img.stem}_h{n}{img.suffix}"
-        dst_label = ANNOTATED_DIR / "labels" / split / f"{label.stem}_h{n}.txt"
-        if dst_img.exists():
-            continue
-        dst_img.parent.mkdir(parents=True, exist_ok=True)
-        dst_label.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(img, dst_img)
-        shutil.copy2(label, dst_label)
-        written += 1
-    return written
-
-
-def _copy_to_split(img: Path, label: Path, split: str) -> bool:
-    """
-    Copies image and label into data/annotated/{images,labels}/{split}/.
-    Returns False if the destination already exists (skips without overwriting).
-    """
-    dst_img   = ANNOTATED_DIR / "images" / split / img.name
-    dst_label = ANNOTATED_DIR / "labels" / split / label.name
+    dst_img   = POOL_DIR / "images" / "train" / img.name
+    dst_label = POOL_DIR / "labels" / "train" / label.name
 
     if dst_img.exists():
-        return False
+        return 0, 0
 
     dst_img.parent.mkdir(parents=True, exist_ok=True)
     dst_label.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(img, dst_img)
     shutil.copy2(label, dst_label)
-    return True
+
+    hard_copies = 0
+    for n in range(2, repeat + 2):
+        dup_img   = POOL_DIR / "images" / "train" / f"{img.stem}_h{n}{img.suffix}"
+        dup_label = POOL_DIR / "labels" / "train" / f"{label.stem}_h{n}.txt"
+        if not dup_img.exists():
+            shutil.copy2(img, dup_img)
+            shutil.copy2(label, dup_label)
+            hard_copies += 1
+
+    return 1, hard_copies
 
 
-def export_labels(train_ratio: float = 0.7,
-                  val_ratio: float   = 0.2,
-                  test_ratio: float  = 0.1,
-                  seed: int = 42,
-                  hard_repeat: int = 3) -> dict[str, int]:
+def export_labels(hard_repeat: int = 3) -> dict[str, int]:
     """
-    Splits labeled pairs and copies them to data/annotated/.
+    Copies newly labeled pairs from data/to_annotate/ into the master pool
+    (data/annotated_backup/images/train and labels/train).
+
     Hard examples (flagged by annotate.py) are duplicated `hard_repeat` extra
-    times in the train split so YOLO trains on them more often.
-    Returns a dict with image counts per split.
+    times so YOLO sees them more often in the next training run.
+
+    After export, run prepare_dataset.py to rebuild the active train/val/test split.
     """
     pairs = _find_labeled_pairs(TO_ANNOTATE_DIR)
     if not pairs:
         print(f"No labeled images found in {TO_ANNOTATE_DIR}")
-        return {"train": 0, "val": 0, "test": 0}
+        return {"added": 0, "hard_copies": 0}
 
-    random.seed(seed)
-    random.shuffle(pairs)
+    print(f"Exporting {len(pairs)} labeled pair(s) to pool ({POOL_DIR}) ...")
+    added = 0
+    hard_total = 0
+    skipped = 0
+    for img, lbl in pairs:
+        repeat = hard_repeat if _is_hard_example(img) else 0
+        base, hard = _copy_to_pool(img, lbl, repeat)
+        if base:
+            added += 1
+            hard_total += hard
+        else:
+            skipped += 1
 
-    n       = len(pairs)
-    n_train = int(n * train_ratio)
-    n_val   = int(n * val_ratio)
+    msg = f"  {added} new image(s) added to pool"
+    if hard_total:
+        msg += f" (+{hard_total} hard example duplicate(s))"
+    if skipped:
+        msg += f", {skipped} already in pool (skipped)"
+    print(msg)
 
-    splits = [
-        ("train", pairs[:n_train]),
-        ("val",   pairs[n_train:n_train + n_val]),
-        ("test",  pairs[n_train + n_val:]),
-    ]
+    for img, lbl in pairs:
+        img.unlink(missing_ok=True)
+        img.with_suffix(".txt").unlink(missing_ok=True)
+        img.with_suffix(".json").unlink(missing_ok=True)
+    print(f"  Cleaned up {len(pairs)} annotated file(s) from {TO_ANNOTATE_DIR}")
 
-    counts: dict[str, int] = {}
-    print(f"Exporting {n} labeled pair(s) from {TO_ANNOTATE_DIR} ...")
-    for split_name, split_pairs in splits:
-        copied = 0
-        hard_copies = 0
-        for img, lbl in split_pairs:
-            if _copy_to_split(img, lbl, split_name):
-                copied += 1
-                if split_name == "train" and _is_hard_example(img):
-                    hard_copies += _copy_hard_duplicates(img, lbl, split_name, hard_repeat)
-        skipped = len(split_pairs) - copied
-        counts[split_name] = copied
-        msg = f"  {split_name}: {copied} copied"
-        if hard_copies:
-            msg += f" (+{hard_copies} hard example duplicate(s))"
-        if skipped:
-            msg += f", {skipped} already existed (skipped)"
-        print(msg)
-
-    print(f"\nDone -> {ANNOTATED_DIR}")
-    return counts
+    print(f"\nPool updated -> run 'python -m src.prepare_dataset' to rebuild train/val/test splits")
+    return {"added": added, "hard_copies": hard_total}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export labeled images to annotated dataset.")
-    parser.add_argument("--split", type=float, nargs=3,
-                        default=[0.7, 0.2, 0.1],
-                        metavar=("TRAIN", "VAL", "TEST"),
-                        help="Split ratios, must sum to 1.0 (default: 0.7 0.2 0.1)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducible split (default: 42)")
+    parser = argparse.ArgumentParser(description="Export labeled images to the dataset pool.")
     parser.add_argument("--hard-repeat", type=int, default=3,
-                        help="Extra copies of hard examples in train split (default: 3)")
+                        help="Extra copies of hard examples in the pool (default: 3)")
     args = parser.parse_args()
-
-    train_r, val_r, test_r = args.split
-    if abs(train_r + val_r + test_r - 1.0) > 0.01:
-        parser.error(f"Split ratios must sum to 1.0 (got {train_r + val_r + test_r:.2f})")
-
-    export_labels(train_ratio=train_r, val_ratio=val_r,
-                  test_ratio=test_r, seed=args.seed,
-                  hard_repeat=args.hard_repeat)
+    export_labels(hard_repeat=args.hard_repeat)
 
 
 if __name__ == "__main__":

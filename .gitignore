@@ -11,6 +11,7 @@ __pycache__/
 data/raw/
 data/to_annotate/
 data/annotated/
+data/annotated_backup/
 data/pointclouds/
 
 models/pretrained/
