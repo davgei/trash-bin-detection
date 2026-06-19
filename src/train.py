@@ -15,7 +15,7 @@ MODELS_DIR  = Path("models/trained")
 
 
 def train(
-    base_model: str = "yolov8n.pt",
+    base_model: str = "yolo11n.pt",
     epochs: int = 50,
     imgsz: int = 640,
     batch: int = 8,
@@ -54,8 +54,8 @@ def train(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train YOLO on the trash bin dataset.")
-    parser.add_argument("--model", type=str, default="yolov8n.pt",
-                        help="Base model to fine-tune (default: yolov8n.pt — smallest/fastest)")
+    parser.add_argument("--model", type=str, default="yolo11n.pt",
+                        help="Base model to fine-tune (default: yolo11n.pt)")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Training epochs (default: 50)")
     parser.add_argument("--imgsz", type=int, default=640,
