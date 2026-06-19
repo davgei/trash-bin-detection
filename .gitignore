@@ -13,6 +13,7 @@ data/to_annotate/
 data/annotated/
 data/annotated_backup/
 data/pointclouds/
+data/*.csv
 
 outputs/
 

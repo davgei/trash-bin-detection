@@ -1,8 +1,14 @@
-# Gateadresser for Street View-bilder
-# Én adresse per linje. Linjer som starter med # ignoreres.
-# Adressen slettes automatisk fra filen etter at bildet er hentet.
+# Adresser eller koordinater for Street View-bilder.
+# Én oppføring per linje. Linjer som starter med # ignoreres.
+# Oppføringen slettes automatisk fra filen etter at bildet er hentet.
+#
+# To typer oppføringer:
+#   - Gateadresse:  geokodes, snappes til nærmeste kasse i CSV-en (innen 30 m)
+#       Karl Johans gate 1, Oslo
+#   - Koordinat (punktum som desimaltegn): kamera siktes rett mot punktet
+#       59.947495, 10.669440
 #
 # Eksempel:
 # Asaktoppen 16, Oslo
-# Karl Johans gate 1, Oslo
+# 59.947495, 10.669440
 
