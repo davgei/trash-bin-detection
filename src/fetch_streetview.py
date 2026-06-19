@@ -111,7 +111,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--size", type=str, default="640x480",
-        help="Image size as WxH (default: 640x480)",
+        help="Image size as WxH, max 640x640 for standard API key (default: 640x480)",
     )
     parser.add_argument(
         "--fov", type=int, default=120,

@@ -3,3 +3,6 @@
 # Adressen slettes automatisk fra filen etter at bildet er hentet.
 #
 # Eksempel:
+# Asaktoppen 16, Oslo
+# Karl Johans gate 1, Oslo
+
