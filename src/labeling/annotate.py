@@ -13,7 +13,8 @@ Phase A — manual mode (no model needed):
 
 Phase B — assisted mode (requires a trained YOLO model):
     YOLO proposes bounding boxes (shown in gold).
-    a / Enter  : accept all proposals and move to next image
+    a / Enter  : accept proposals and move to next image
+                 (if YOLO proposes nothing: confirms the image has no trash bins)
     b          : mark image as background — no trash bin present (saves empty label)
     r          : reject proposals and switch to manual drawing for this image
     s          : skip image without saving any label
@@ -282,7 +283,7 @@ def _run_assisted(image_path: Path, image: np.ndarray,
 
     _HELP_WITH    = (f"{len(proposals)} proposal(s) | "
                      "a/Enter: accept | b: no bin here | r: redraw | s: skip | q: quit")
-    _HELP_NONE    = "No YOLO proposals | b: background | r: draw manually | s: skip | q: quit"
+    _HELP_NONE    = "No YOLO proposals | a/Enter: confirm no bin | r: draw manually | s: skip | q: quit"
     _HELP_MANUAL  = "Draw box | s/Enter: save | b: no bin here | z: undo | c: clear | Esc: skip | q: quit"
     _HELP_CONFIRM = "No boxes -- s/Enter: confirm background | Esc: cancel"
 
@@ -316,9 +317,8 @@ def _run_assisted(image_path: Path, image: np.ndarray,
             confirm_bg = False
 
         if not manual_mode:
-            if key in (ord("a"), 13) and disp_proposals:
+            if key in (ord("a"), 13):
                 stats.record(True)
-                # proposals are already in original image coords (not display coords)
                 _save_label(image_path, proposals, orig_w, orig_h)
                 return "next"
             elif key == ord("b"):
