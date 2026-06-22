@@ -172,7 +172,7 @@ def main() -> None:
         help="Search radius in metres for the nearest panorama (default: 50)",
     )
     parser.add_argument(
-        "--csv", type=Path, default=Path("data/Uttrekk_products(result).csv"),
+        "--csv", type=Path, default=Path("data/hentesteder.csv"),
         help="Bin coordinate CSV used to snap addresses to the nearest bin",
     )
     parser.add_argument(
