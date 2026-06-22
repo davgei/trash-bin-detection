@@ -66,14 +66,26 @@ QUIT_KEYS   = (ord("q"), 27)       # q, Esc
 PREFETCH_DEFAULT = 5
 
 
+def _label_path(output: Path, split: str, stem: str) -> Path:
+    return output / "labels" / split / f"{stem}.txt"
+
+
+def _skip_path(output: Path, split: str, stem: str) -> Path:
+    return output / "labels" / split / f"{stem}.skip"
+
+
 def build_worklist(source: Path, output: Path, splits: tuple[str, ...],
                    overwrite: bool) -> list[tuple[str, Path]]:
     """Returns (split, image_path) pairs still needing a label, in split order."""
     worklist: list[tuple[str, Path]] = []
     for split in splits:
         for image_path in list_split_images(source, split):
-            out_label = output / "labels" / split / f"{image_path.stem}.txt"
-            if out_label.exists() and not overwrite:
+            stem = image_path.stem
+            already_done = (
+                _label_path(output, split, stem).exists()
+                or _skip_path(output, split, stem).exists()
+            )
+            if already_done and not overwrite:
                 continue
             worklist.append((split, image_path))
     return worklist
@@ -166,8 +178,8 @@ def main() -> None:
 
     worklist = build_worklist(args.source, args.output, tuple(args.splits), args.overwrite)
     if not worklist:
-        print("Ingenting å gjennomgå — alle bilder har allerede en seg-label "
-              "(bruk --overwrite for å se dem på nytt).")
+        print("Ingenting å gjennomgå — alle bilder er godkjent, hoppet over eller flagget "
+              "(bruk --overwrite for å se alt på nytt).")
         return
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,10 +280,13 @@ def main() -> None:
                 rows += [{"filename": image_path.name, "split": split, **flag}
                          for flag in comp.flags]
                 append_review_rows(review_path, rows)
+                _skip_path(args.output, split, image_path.stem).touch()
                 flagged += 1
                 print(f"  flagget: {image_path.name}")
-            else:
+            elif decision == "skip":
+                _skip_path(args.output, split, image_path.stem).touch()
                 skipped += 1
+                print(f"  hoppet over: {image_path.name}")
 
     cv2.destroyAllWindows()
     print(f"\nFerdig denne økten: {accepted} godkjent, {skipped} hoppet over, "

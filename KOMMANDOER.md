@@ -229,8 +229,8 @@ Taster i vinduet:
 | Tast | Handling |
 |---|---|
 | `a` / Enter / mellomrom | **Godkjenn** — skriver bilde + label + forhåndsvisning til seg-datasettet |
-| `s` | **Hopp over** — lagrer ingenting; bildet dukker opp igjen neste kjøring |
-| `f` | **Flagg** — logg til `review_flags.csv` og hopp over (manuell-fiks-bunken) |
+| `s` | **Hopp over** — skriver en `.skip`-markør; bildet dukker **ikke** opp igjen (bruk `--overwrite` for å se det på nytt) |
+| `f` | **Flagg** — logg til `review_flags.csv` + `.skip`-markør (manuell-fiks-bunken, kommer ikke igjen) |
 | `o` | Slå maske-overlegget av/på (sammenlign mot originalbildet) |
 | `q` / Esc | **Avslutt** — fremdrift er lagret; fortsetter der du slapp |
 
