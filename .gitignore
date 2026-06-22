@@ -12,8 +12,11 @@ data/raw/
 data/to_annotate/
 data/annotated/
 data/annotated_backup/
+data/annotated_seg/
 data/pointclouds/
 data/*.csv
+data/*.zip
+data/hentesteder_chunks/
 
 outputs/
 

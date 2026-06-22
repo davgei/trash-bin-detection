@@ -15,14 +15,14 @@ $env:GOOGLE_MAPS_API_KEY = "din-nøkkel"
 
 **Hente bilder:**
 ```powershell
+# Del hovedfila (data/hentesteder.csv) i biter à 1000 hentesteder (kjør én gang)
+py -3.14 -m src.split_hentesteder
+
 # Test: bare geometri, henter ingen bilder (gratis)
-py -3.14 -m src.fetch_streetview_from_csv --dry-run --limit 5
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv --dry-run --limit 5
 
-# Test: hent de 5 første kassene
-py -3.14 -m src.fetch_streetview_from_csv --limit 5
-
-# Hent alle aktive kasser fra CSV
-py -3.14 -m src.fetch_streetview_from_csv
+# Hent ÉN bit av gangen (~1000 hentesteder) — med deteksjon + retry
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv
 
 # Hent fra adresse-/koordinatfil
 py -3.14 -m src.fetch_streetview
@@ -59,33 +59,59 @@ Nøkkelen gjelder bare for den terminal-økten. Åpner du en ny terminal, må de
 
 ## 1. Hente Street View-bilder fra kasse-CSV (anbefalt)
 
-Leser eksakte kassekoordinater fra `data/Uttrekk_products(result).csv`, finner nærmeste
-panorama og sikter kameraet rett mot kassen. Bildene lagres i `data/to_annotate/`.
+Hovedfila `data/hentesteder.csv` har ~196 000 rader (én per beholder) men bare ~55 000
+unike hentesteder. Del den derfor **først** i biter à 1000 unike steder, og hent **én bit
+av gangen** — det er sikkerheten mot å bruke opp API-kvoten ved et uhell. Skriptet finner
+nærmeste panorama og sikter kameraet rett mot stedet. Bildene lagres i `data/to_annotate/`.
+
+**Del opp først (kjør én gang, gratis):**
+```powershell
+py -3.14 -m src.split_hentesteder      # -> data/hentesteder_chunks/hentesteder_001.csv, _002 ...
+```
+
+**Deteksjon + retry:** etter at det nærmeste bildet er hentet, kjøres YOLO på det. Ser
+modellen en kasse, går vi videre. Ser den ingen, hentes også det *nest nærmeste* panoramaet
+(med ny heading/pitch). Under annotering beholdes **begge** bilder (det nest nærmeste får
+`_p2.jpg`), siden YOLO kan bomme — du avgjør selv ved annotering. `--no-detect` gir gammel
+oppførsel (bare nærmeste, ingen YOLO).
+
+Koster opptil **2 bildehentinger per sted** (1 hvis YOLO ser kassen med en gang).
+Metadata-søk er gratis. Krever at `--model`-vektene finnes.
 
 ```powershell
-# Tørrkjøring: bare geometri + gratis metadata, henter INGEN bilder
-py -3.14 -m src.fetch_streetview_from_csv --dry-run --limit 5
+# Tørrkjøring på én bit: bare geometri + gratis metadata, ingen bilder, ingen YOLO
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv --dry-run --limit 5
 
-# Hent de 5 første for å se om sikting ser riktig ut
-py -3.14 -m src.fetch_streetview_from_csv --limit 5
+# Hent ~5 nye bilder fra biten for å se om sikting ser riktig ut
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv --limit 5
 
-# Hent alle aktive kasser
-py -3.14 -m src.fetch_streetview_from_csv
+# Hent hele biten (~1000 steder, med deteksjon + retry)
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv
+
+# Gammel oppførsel: bare nærmeste panorama, ingen YOLO
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv --no-detect
 ```
 
 Nyttige flagg:
 | Flagg | Hva det gjør |
 |---|---|
-| `--dry-run` | Beregner heading/pitch og sjekker metadata, men laster ikke ned bilder (gratis) |
-| `--limit N` | Behandler bare de N første stedene (for testing) |
-| `--include-inactive` | Tar også med kasser merket `Active=USANN` |
+| `--csv <fil>` | Hvilken bit som hentes, f.eks. `data/hentesteder_chunks/hentesteder_001.csv` |
+| `--no-detect` | Skru av YOLO + retry — hent bare nærmeste panorama (gammel oppførsel) |
+| `--model <vekter>` | YOLO-vekter for deteksjon (default `models/trained/trash_bin_yolo11n_best.pt`) |
+| `--conf 0.25` | Konfidensgrense for «ser YOLO en kasse?» |
+| `--max-attempts 2` | Panorama per sted: 1 = bare nærmeste, 2 = også nest nærmeste ved bom |
+| `--ring-radius 18` | Søkeradius (m) for å finne det nest nærmeste panoramaet |
+| `--dry-run` | Beregner heading/pitch + metadata, laster ikke ned bilder, ingen YOLO (gratis) |
+| `--limit N` | Stopp etter ~N nye bilder (et sted kan gi 2 ved retry) |
+| `--include-inactive` | Tar med `Active=USANN` (kun Uttrekk-formatet; hentesteder har ingen Active-kolonne) |
 | `--reverse-geocode` | Slår opp gateadresse for hvert sted (ekstra API-kall) |
 | `--size 640x480` | Bildestørrelse (maks 640x640 med standard nøkkel) |
 | `--fov 120` | Synsvinkel i grader |
 | `--radius 50` | Søkeradius i meter for nærmeste panorama |
 
 Henter på nytt? Den hopper over bilder som allerede finnes — ingen dobbelthenting.
-Logg over alt som hentes skrives til `data/streetview_log.csv`.
+Logg over alt som hentes skrives til `data/streetview_log.csv` (nye kolonner:
+`attempts`, `detected`, `detection_conf`, `pano_rank`, `pair`).
 
 ---
 
@@ -132,6 +158,84 @@ Taster: `a/Enter` godkjenn · `b` ingen kasse · `r` tegn på nytt · `s` hopp o
 | `--model <vekter>` | Påkrevd i assistert modus |
 | `--conf 0.25` | Konfidensgrense for YOLO-forslag |
 | `--dir <mappe>` | Annen bildemappe (default `data/to_annotate/`) |
+
+---
+
+## 3.5 Lage segmenteringsdatasett (SAM2 + ADE20K)
+
+Bygger et YOLO-seg-datasett (`0 trash_bin`, `1 ground`) fra det eksisterende
+deteksjonsdatasettet — uten å tegne masker manuelt. For hvert bilde i
+`data/annotated/` brukes den eksisterende bounding-boksen som prompt til **SAM2**
+(lager kassemaske), og en ferdigtrent **ADE20K-modell** slår sammen
+road/sidewalk/earth/grass til én `ground`-maske. Usikre kassemasker flagges til
+`data/annotated_seg/review_flags.csv`, og hvert bilde får en forhåndsvisning med
+maskene tegnet på.
+
+Leser kun fra `data/annotated/` (skriver aldri dit, rører aldri
+`annotated_backup`). Det nye datasettet speiler train/val/test-splitten fra kilden.
+Modellvektene lastes ned én gang og kjører på GPU hvis tilgjengelig, ellers CPU.
+
+```powershell
+# Røyktest: behandle 3 bilder (rask, liten modell)
+py -3.14 -m src.labeling.sam2_seg_autolabel --limit 3 --semantic-model nvidia/segformer-b0-finetuned-ade-512-512
+
+# Full kjøring (default B5-modell, helst på GPU — Colab eller 4070)
+py -3.14 -m src.labeling.sam2_seg_autolabel
+```
+
+| Flagg | Hva det gjør |
+|---|---|
+| `--source <mappe>` | Deteksjonsdatasett å lese bilder + bokser fra (default `data/annotated`) |
+| `--output <mappe>` | Hvor seg-datasettet skrives (default `data/annotated_seg`) |
+| `--sam-model <vekter>` | SAM2-vekter for kassemasker (default `sam2.1_b.pt`) |
+| `--semantic-model <navn>` | HF ADE20K-modell for ground (default `nvidia/segformer-b5-finetuned-ade-640-640`) |
+| `--splits train val test` | Hvilke splitter som behandles |
+| `--limit N` | Stopp etter N nye bilder (ferdige hoppes over) |
+| `--overwrite` | Behandle bilder på nytt selv om seg-label finnes |
+| `--device cpu\|cuda` | Tving enhet (default: auto) |
+| `--clip-margin 0.15` | Hvor mye boksen utvides før kassemasken klippes (hindrer at SAM2 tar med gjerder ved siden av) |
+
+Kjør på nytt? Bilder som allerede har en seg-label hoppes over. Etter kjøring:
+sjekk forhåndsvisningene i `data/annotated_seg/previews/` og de flaggede bildene i
+`review_flags.csv` før du trener. Treningsskriptet for YOLO-seg legges til etter
+at du har kontrollert annoteringene.
+
+Dette steget kjører hele datasettet i én batch. Vil du i stedet godkjenne ett og
+ett bilde mens SAM2 kjører fortløpende, bruk den interaktive gjennomgangen under.
+
+---
+
+## 3.6 Interaktiv gjennomgang (godkjenn ett bilde om gangen)
+
+Samme pipeline som 3.5, men SAM2 + ground-modellen kjøres på **ett bilde om gangen**
+og maskene vises i et OpenCV-vindu der du godkjenner eller hopper over hvert bilde.
+Et godkjent bilde gir nøyaktig samme label som batch-kjøringen. Mens du ser på ett
+bilde, segmenteres det neste i bakgrunnen, så det føles raskt etter det første.
+
+> Vinduet trenger en lokal skjerm — kjør dette på din egen maskin, **ikke** på en
+> headless Colab.
+
+```powershell
+# Gå gjennom alt som mangler en seg-label
+py -3.14 -m src.labeling.sam2_seg_review
+
+# Bare én split (f.eks. val)
+py -3.14 -m src.labeling.sam2_seg_review --splits val
+```
+
+Taster i vinduet:
+
+| Tast | Handling |
+|---|---|
+| `a` / Enter / mellomrom | **Godkjenn** — skriver bilde + label + forhåndsvisning til seg-datasettet |
+| `s` | **Hopp over** — lagrer ingenting; bildet dukker opp igjen neste kjøring |
+| `f` | **Flagg** — logg til `review_flags.csv` og hopp over (manuell-fiks-bunken) |
+| `o` | Slå maske-overlegget av/på (sammenlign mot originalbildet) |
+| `q` / Esc | **Avslutt** — fremdrift er lagret; fortsetter der du slapp |
+
+Samme flagg som 3.5 (`--source`, `--output`, `--sam-model`, `--semantic-model`,
+`--splits`, `--overwrite`, `--device`, `--clip-margin`), pluss `--limit N` som
+stopper etter N gjennomgåtte bilder denne økten.
 
 ---
 
@@ -186,6 +290,21 @@ py -3.14 -m src.evaluate --split val
 |---|---|
 | `--model <vekter>` | Hvilke vekter som evalueres (default run3) |
 | `--split train\|val\|test` | Hvilken splitt (default test) |
+
+---
+
+## 7. Statistikk: treff på andre forsøk
+
+Leser `data/streetview_log.csv` og viser hvor ofte YOLO fant en kasse på det
+*nest nærmeste* panoramaet, blant stedene der det nærmeste bommet (retry).
+
+```powershell
+py -3.14 -m src.streetview_stats
+py -3.14 -m src.streetview_stats --log data/streetview_log.csv
+```
+
+Skriver ut antall andreforsøk, antall treff og prosenten. (Krever at du har kjørt
+`fetch_streetview_from_csv` med deteksjon på, så loggen har `pano_rank`-kolonnen.)
 
 ---
 

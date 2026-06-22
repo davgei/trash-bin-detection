@@ -1,0 +1,9 @@
+path: ../data/annotated_seg  # relative to this file's location (configs/)
+
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: trash_bin
+  1: ground
