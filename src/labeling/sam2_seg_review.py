@@ -6,9 +6,10 @@ the ground model on ONE image at a time and shows the proposed masks in an OpenC
 window so you approve/skip each image yourself. It reuses the exact same pipeline,
 so an accepted label is byte-identical to what the batch would have written.
 
-While you look at the current image, the next image is segmented in a background
-thread, so after the first image, approving feels near-instant as long as you
-spend a few seconds per image.
+While you look at the current image, the next few images are segmented ahead in a
+background thread (a look-ahead buffer, default 5). After the first image,
+approving feels near-instant — and the buffer absorbs bursts where you blast
+through several quick decisions in a row.
 
 Controls (shown in the window):
     a / Enter / Space   approve  -> writes image + label + preview to the output set
@@ -33,6 +34,7 @@ Run from the project root:
 import argparse
 import csv
 import shutil
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -61,6 +63,7 @@ from src.labeling.sam2_seg_autolabel import (
 WINDOW = "seg-review"
 ACCEPT_KEYS = (ord("a"), 13, 32)   # a, Enter, Space
 QUIT_KEYS   = (ord("q"), 27)       # q, Esc
+PREFETCH_DEFAULT = 5
 
 
 def build_worklist(source: Path, output: Path, splits: tuple[str, ...],
@@ -153,6 +156,8 @@ def main() -> None:
                         help="Force device, e.g. cpu or cuda (default: auto-detect)")
     parser.add_argument("--clip-margin", type=float, default=BIN_CLIP_MARGIN,
                         help=f"Expand each box by this fraction before clipping the bin mask (default: {BIN_CLIP_MARGIN})")
+    parser.add_argument("--prefetch", type=int, default=PREFETCH_DEFAULT,
+                        help=f"How many images to segment ahead in the background (default: {PREFETCH_DEFAULT})")
     args = parser.parse_args()
 
     if not args.source.exists():
@@ -186,17 +191,31 @@ def main() -> None:
     limit = args.limit if args.limit is not None else len(worklist)
     last_index = min(limit, len(worklist))
 
+    prefetch = max(1, args.prefetch)
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    # One worker only: the SAM2 and ground model objects are shared and not safe
+    # to call from several threads at once. The look-ahead depth comes from the
+    # buffer below, not from extra workers — the single worker keeps grinding
+    # ahead so up to `prefetch` images are ready by the time you reach them.
     with ThreadPoolExecutor(max_workers=1) as pool:
         compute = lambda item: process_one(item, args.source, sam, processor,
                                            semantic, ground_ids, device, args.clip_margin)
-        future = pool.submit(compute, worklist[0])
+        pending: deque = deque()
+        submitted = 0
+
+        def top_up() -> None:
+            nonlocal submitted
+            while len(pending) < prefetch and submitted < last_index:
+                pending.append(pool.submit(compute, worklist[submitted]))
+                submitted += 1
+
+        top_up()
         quit_requested = False
         for index in range(last_index):
             split, image_path = worklist[index]
+            future = pending.popleft()
+            top_up()
             result = future.result()
-            if index + 1 < last_index:
-                future = pool.submit(compute, worklist[index + 1])
 
             if result is None:
                 print(f"  hopper over (kan ikke behandle): {image_path.name}")
@@ -231,6 +250,8 @@ def main() -> None:
 
             if decision == "quit":
                 quit_requested = True
+                for queued in pending:
+                    queued.cancel()
                 break
             if decision == "accept":
                 save_accepted(args.output, split, image_path, image, boxes, comp)

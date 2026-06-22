@@ -210,7 +210,8 @@ ett bilde mens SAM2 kjører fortløpende, bruk den interaktive gjennomgangen und
 Samme pipeline som 3.5, men SAM2 + ground-modellen kjøres på **ett bilde om gangen**
 og maskene vises i et OpenCV-vindu der du godkjenner eller hopper over hvert bilde.
 Et godkjent bilde gir nøyaktig samme label som batch-kjøringen. Mens du ser på ett
-bilde, segmenteres det neste i bakgrunnen, så det føles raskt etter det første.
+bilde, segmenteres de neste i bakgrunnen (look-ahead-buffer på 5 bilder), så det
+føles raskt etter det første — også når du klikker raskt gjennom flere på rad.
 
 > Vinduet trenger en lokal skjerm — kjør dette på din egen maskin, **ikke** på en
 > headless Colab.
@@ -235,7 +236,8 @@ Taster i vinduet:
 
 Samme flagg som 3.5 (`--source`, `--output`, `--sam-model`, `--semantic-model`,
 `--splits`, `--overwrite`, `--device`, `--clip-margin`), pluss `--limit N` som
-stopper etter N gjennomgåtte bilder denne økten.
+stopper etter N gjennomgåtte bilder denne økten, og `--prefetch N` som styrer hvor
+mange bilder som segmenteres i forkant (default 5).
 
 ---
 
@@ -273,6 +275,34 @@ py -3.14 -m src.train --epochs 100 --name run4
 | `--patience` | Early stopping: epoker uten forbedring før stopp |
 
 (Tung trening gjøres normalt på Colab med GPU; beste modell så langt er `models/trained/trash_bin_yolo11n_best.pt`.)
+
+---
+
+## 5.5 Trene segmenteringsmodell (YOLO-seg)
+
+Trener en YOLO-segmenteringsmodell på seg-datasettet (`data/annotated_seg/`, klasser
+`0 trash_bin` + `1 ground`) bygget i 3.5/3.6. Speiler `src.train`, men bruker
+`configs/data_seg.yaml` og en `-seg`-basemodell. Ultralytics kjenner igjen
+segmenteringsoppgaven og lagrer under `runs/segment/...`, så deteksjonsvektene i
+`runs/detect/...` røres aldri.
+
+```powershell
+py -3.14 -m src.train_seg
+py -3.14 -m src.train_seg --epochs 100 --name seg2
+```
+
+| Flagg | Hva det gjør |
+|---|---|
+| `--model yolo11n-seg.pt` | Basis-segmenteringsmodell å finjustere fra |
+| `--epochs 50` | Antall epoker |
+| `--imgsz 640` | Bildestørrelse i piksler |
+| `--batch 8` | Batch-størrelse |
+| `--name seg` | Navn på treningskjøringen |
+| `--patience 20` | Early stopping: epoker uten forbedring før stopp |
+
+Vekter lagres under `runs/segment/models/trained/<navn>/weights/best.pt`.
+Krever at seg-datasettet er bygget (3.5/3.6) og at `data/annotated_seg/` har
+bilder i train/val. Tung trening gjøres normalt på Colab med GPU.
 
 ---
 
