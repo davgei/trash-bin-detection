@@ -134,17 +134,14 @@ def main() -> None:
         with open(pkl_path, "rb") as fh:
             entry = pickle.load(fh)
 
-        image_path = Path(entry["image_path"])
-        stem = image_path.stem
+        filename: str = entry.get("image_filename") or Path(entry.get("image_path", "")).name
+        stem = Path(filename).stem
         bin_polygons: list[list[float]] = entry["bin_polygons"]
         ground_polygons: list[list[float]] = entry["ground_polygons"]
         is_flagged: bool = entry["flagged"]
         flags: list[dict] = entry["flags"]
 
-        # image_path from pkl may be an absolute Colab/Drive path — fall back to local source
-        if not image_path.exists():
-            image_path = args.source / "images" / split / image_path.name
-
+        image_path = args.source / "images" / split / filename
         raw_image = cv2.imread(str(image_path))
         preview_image = cv2.imread(str(preview_path))
 
