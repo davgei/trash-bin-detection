@@ -22,6 +22,15 @@ since the REST API returns no neighbour list) and fetched too. During annotation
 BOTH images are kept (YOLO has false negatives — the human reviewer decides).
 Use --no-detect to reproduce the old single-fetch behaviour.
 
+By default, standplasser the hentesteder export marks as unlikely to show a
+street-visible bin are dropped before fetching — locked door, "trilles frem",
+stairs with more than one step, an elevator, a sack instead of a bin, a pickup
+distance over --max-pickup-dist metres, or a waste-room hint in Opplysning
+(søppelrom, kjeller, garasje, …). Låst_skap/Låst_kasse are deliberately NOT used:
+the locked cabinet often holds something else while the bins stand in the open.
+This avoids spending API calls on house/building walls. Pass --no-access-filter
+to fetch everything.
+
 Images are saved to data/to_annotate/ so they flow into the existing annotation
 pipeline. A log of every fetch is written to data/streetview_log.csv.
 
@@ -32,6 +41,7 @@ Run from the project root:
     py -3.14 -m src.fetch_streetview_from_csv --dry-run           # geometry only, no images, no detection
     py -3.14 -m src.fetch_streetview_from_csv --limit 5           # stop after ~5 new images
     py -3.14 -m src.fetch_streetview_from_csv --no-detect         # fetch nearest only, no YOLO, no retry
+    py -3.14 -m src.fetch_streetview_from_csv --no-access-filter  # do not drop hard-to-see standplasser
 """
 
 import argparse
@@ -54,14 +64,23 @@ CAMERA_HEIGHT_M = 2.5   # approximate height of the Street View car camera
 TARGET_HEIGHT_M = 0.5   # approximate height we aim at on the bin
 MIN_PITCH_DEG   = -45.0
 
-DEFAULT_MODEL = Path("models/trained/trash_bin_yolo11n_best.pt")
+DEFAULT_MODEL = Path("models/trained/colab_seg/weights/best.pt")
 DEFAULT_CONF  = 0.25
+CLASS_TRASH_BIN = 0   # seg-modellen har også klasse 1 (ground); kun klasse 0 teller
+
+DEFAULT_MAX_PICKUP_DIST = 25.0   # Henteavstand over dette: kassen står trolig for langt fra veien
+# Fritekst i Opplysning som tyder på at kassen står i et søppelrom / innelåst og ikke er synlig fra gata
+SOPPELROM_KEYWORDS = (
+    "søppelrom", "soppelrom", "avfallsrom", "miljørom", "miljorom",
+    "kjeller", "garasje", "skur", "innendørs", "innendors",
+)
 
 SECOND_PANO_RADIUS_M  = 30
 DIRECTIONAL_OFFSETS_M = (15.0, 25.0)
 RING_BEARINGS_DEG     = (0.0, 60.0, 120.0, 180.0, 240.0, 300.0)
 DEFAULT_RING_RADIUS_M = 18.0
 TEMPORAL_DUP_EPS_M    = 5.0
+ANGULAR_DEDUP_DEG     = 30.0   # same pano is a duplicate only within this heading spread
 
 LOG_COLUMNS = [
     "filename", "product_numbers", "bin_lat", "bin_lng",
@@ -104,6 +123,49 @@ def _parse_coord(value: str | None) -> float | None:
         return None
 
 
+def _is_yes(value: str | None) -> bool:
+    """True for the 'yes' marker in hentesteder columns ('J' or 'JA')."""
+    return (value or "").strip().upper().startswith("J")
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int((value or "").strip())
+    except ValueError:
+        return None
+
+
+def skip_reason(row: dict, max_pickup_dist: float) -> str | None:
+    """Why this standplass is unlikely to show a bin visible from the street.
+
+    Reads the hentesteder access columns; returns a short Norwegian reason to drop
+    the row, or None to keep it. Returns None for the Uttrekk export (these columns
+    are absent), so the filter is a no-op there.
+    """
+    door = _int_or_none(row.get("Låst_dør"))
+    if door is not None and door >= 1:
+        return "låst dør"
+    # Låst_skap / Låst_kasse droppes IKKE: et låst skap gjelder ofte noe annet,
+    # mens selve kassene står fritt synlige (verifisert på streetview_10111148).
+    if _is_yes(row.get("Trilles_frem")):
+        return "trilles frem"
+    trinn = _int_or_none(row.get("Trinn"))
+    if trinn is not None and trinn > 1:
+        return "trapp >1 trinn"
+    if _is_yes(row.get("Heis")):
+        return "heis"
+    if (row.get("Beholdertype") or "").strip().lower() == "sekk":
+        return "sekk"
+    dist = _int_or_none(row.get("Henteavstand"))
+    if dist is not None and dist > max_pickup_dist:
+        return f"henteavstand >{max_pickup_dist:.0f}m"
+    info = (row.get("Opplysning") or "").lower()
+    for keyword in SOPPELROM_KEYWORDS:
+        if keyword in info:
+            return f"opplysning:{keyword}"
+    return None
+
+
 def _csv_delimiter(csv_path: Path) -> str:
     """Detects ';' (hentesteder export) vs ',' (Uttrekk export) from the header."""
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
@@ -111,7 +173,17 @@ def _csv_delimiter(csv_path: Path) -> str:
     return ";" if header.count(";") >= header.count(",") else ","
 
 
-def read_bins(csv_path: Path, active_only: bool = True) -> list[Bin]:
+def read_bins(csv_path: Path, active_only: bool = True,
+              access_filter: bool = False,
+              max_pickup_dist: float = DEFAULT_MAX_PICKUP_DIST,
+              skipped: dict[str, int] | None = None) -> list[Bin]:
+    """Reads bins from a hentesteder (';') or Uttrekk (',') export.
+
+    With access_filter, standplasser unlikely to show a street-visible bin (locked
+    door, rolled out, stairs >1 step, elevator, sack, far pickup distance, or a
+    waste-room hint in Opplysning) are dropped; reasons are tallied into skipped if
+    a dict is given.
+    """
     bins: list[Bin] = []
     delimiter = _csv_delimiter(csv_path)
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
@@ -122,6 +194,12 @@ def read_bins(csv_path: Path, active_only: bool = True) -> list[Bin]:
             lng = _parse_coord(row.get("Lengdegrad") or row.get("Longitude"))
             if lat is None or lng is None:
                 continue
+            if access_filter:
+                reason = skip_reason(row, max_pickup_dist)
+                if reason is not None:
+                    if skipped is not None:
+                        skipped[reason] = skipped.get(reason, 0) + 1
+                    continue
             bins.append(Bin(
                 product_number=(row.get("Beholderid") or row.get("ProductNumber") or "").strip(),
                 lat=lat,
@@ -208,6 +286,26 @@ def already_fetched(filename: str) -> bool:
         if (POOL_DIR / "images" / split / filename).exists():
             return True
     return False
+
+
+def _angular_diff(a: float, b: float) -> float:
+    """Smallest absolute difference between two compass bearings, in degrees."""
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def heading_already_fetched(seen: dict[str, list[float]], pano_id: str,
+                            heading: float, eps_deg: float) -> bool:
+    """True if this pano was already fetched aimed within eps_deg of this heading.
+
+    A panorama may serve several nearby bins in different directions, so the same
+    pano is only a duplicate when the camera also points roughly the same way.
+    """
+    return any(_angular_diff(heading, h) <= eps_deg for h in seen.get(pano_id, []))
+
+
+def register_pano_heading(seen: dict[str, list[float]], pano_id: str,
+                          heading: float) -> None:
+    seen.setdefault(pano_id, []).append(heading)
 
 
 def streetview_metadata(lat: float, lng: float, api_key: str,
@@ -300,8 +398,10 @@ def second_nearest_pano(bin_lat: float, bin_lng: float, pano0_id: str,
 def detect_bin(model: object, image_path: Path, conf: float) -> tuple[bool, float]:
     """Runs YOLO on one image and returns (bin_detected, best_confidence).
 
-    Single-class detector (class 0 = trash_bin), so any returned box is a bin.
-    A corrupt or unreadable image counts as no detection rather than crashing.
+    Only class 0 (trash_bin) counts. The seg model also predicts class 1 (ground),
+    which is ignored here; a single-class detector returns only class 0 anyway, so
+    this works for both. A corrupt or unreadable image counts as no detection
+    rather than crashing.
     """
     try:
         results = model.predict(str(image_path), conf=conf, verbose=False)
@@ -312,10 +412,12 @@ def detect_bin(model: object, image_path: Path, conf: float) -> tuple[bool, floa
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
         return False, 0.0
-    confidences = boxes.conf.tolist()
-    if not confidences:
-        return True, 0.0
-    return True, float(max(confidences))
+    classes = boxes.cls.cpu().numpy().astype(int)
+    confidences = boxes.conf.cpu().numpy()
+    bin_confs = confidences[classes == CLASS_TRASH_BIN]
+    if bin_confs.size == 0:
+        return False, 0.0
+    return True, float(bin_confs.max())
 
 
 def second_location_filename(location: Location) -> str:
@@ -384,17 +486,28 @@ def main() -> None:
                         help=f"CSV with bin coordinates (default: {CSV_FILE})")
     parser.add_argument("--size", type=str, default="640x480",
                         help="Image size as WxH, max 640x640 for standard API key (default: 640x480)")
-    parser.add_argument("--fov", type=int, default=120,
-                        help="Field of view in degrees, 10-120 (default: 120)")
+    parser.add_argument("--fov", type=int, default=80,
+                        help="Field of view in degrees, 10-120 (default: 80)")
     parser.add_argument("--pitch", type=float, default=None,
                         help="Fixed pitch in degrees; if omitted, computed from distance")
     parser.add_argument("--radius", type=int, default=50,
                         help="Search radius in metres for the nearest panorama (default: 50)")
+    parser.add_argument("--dedup-angle", type=float, default=ANGULAR_DEDUP_DEG,
+                        help="Skip an already-fetched pano only if the camera also points within "
+                             f"this many degrees of a previous aim; lower = re-fetch more readily "
+                             f"(default: {ANGULAR_DEDUP_DEG})")
     parser.add_argument("--limit", type=int, default=None,
                         help="Stop after ~N new images (a location may yield 2 when it retries); "
                              "already-fetched are skipped and do not count")
     parser.add_argument("--include-inactive", action="store_true",
                         help="Also fetch bins marked Active=USANN")
+    parser.add_argument("--no-access-filter", action="store_true",
+                        help="Do not drop standplasser that are likely not street-visible "
+                             "(locked door, rolled out, stairs >1 step, elevator, "
+                             "sack, far pickup distance, waste-room hint)")
+    parser.add_argument("--max-pickup-dist", type=float, default=DEFAULT_MAX_PICKUP_DIST,
+                        help=f"Drop standplasser with Henteavstand over this many metres "
+                             f"(default: {DEFAULT_MAX_PICKUP_DIST:.0f})")
     parser.add_argument("--reverse-geocode", action="store_true",
                         help="Also look up the street address for each location (extra API call)")
     parser.add_argument("--dry-run", action="store_true",
@@ -419,9 +532,17 @@ def main() -> None:
         print(f"CSV ikke funnet: {args.csv}")
         return
 
-    bins = read_bins(args.csv, active_only=not args.include_inactive)
+    skipped: dict[str, int] = {}
+    bins = read_bins(args.csv, active_only=not args.include_inactive,
+                     access_filter=not args.no_access_filter,
+                     max_pickup_dist=args.max_pickup_dist, skipped=skipped)
     locations = dedupe_by_location(bins)
 
+    if skipped:
+        total = sum(skipped.values())
+        breakdown = ", ".join(f"{reason}: {n}"
+                              for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]))
+        print(f"Filtrerte bort {total} standplass(er) (ikke synlig fra gata) — {breakdown}")
     print(f"Leste {len(bins)} kasse(r) -> {len(locations)} unike steder")
     if args.limit is not None:
         print(f"Stopper etter ~{args.limit} nye bilde(r).")
@@ -444,7 +565,15 @@ def main() -> None:
         print(f"Deteksjon på: conf >= {args.conf}, opptil {args.max_attempts} panorama per sted.\n")
 
     fetched = skipped = no_imagery = failed = produced = 0
-    logged_pano_ids: set[str] = {row["pano_id"] for row in log.values() if row.get("pano_id")}
+    logged_pano_headings: dict[str, list[float]] = {}
+    for row in log.values():
+        pid = row.get("pano_id")
+        if not pid:
+            continue
+        try:
+            register_pano_heading(logged_pano_headings, pid, float(row["heading"]))
+        except (KeyError, ValueError):
+            pass
 
     for i, loc in enumerate(locations, start=1):
         if args.limit is not None and produced >= args.limit:
@@ -471,15 +600,16 @@ def main() -> None:
             continue
 
         pano0_id  = meta["pano_id"]
-        if pano0_id in logged_pano_ids:
-            print(f"-> hopper over: panorama {pano0_id[:12]}… allerede hentet fra et annet sted")
-            skipped += 1
-            continue
         pano0_lat = meta["location"]["lat"]
         pano0_lng = meta["location"]["lng"]
+        head0     = bearing(pano0_lat, pano0_lng, loc.lat, loc.lng)
+        if heading_already_fetched(logged_pano_headings, pano0_id, head0, args.dedup_angle):
+            print(f"-> hopper over: panorama {pano0_id[:12]}… allerede hentet i ~samme retning "
+                  f"(heading {head0:.0f}°)")
+            skipped += 1
+            continue
         date0     = meta.get("date", "")
         dist0     = haversine_m(pano0_lat, pano0_lng, loc.lat, loc.lng)
-        head0     = bearing(pano0_lat, pano0_lng, loc.lat, loc.lng)
         pitch0    = args.pitch if args.pitch is not None else auto_pitch(dist0)
 
         address = ""
@@ -509,7 +639,7 @@ def main() -> None:
                 pitch0, date0, status, address,
                 attempts=1, detected=None, conf=None, pano_rank=1, pair="",
             )
-            logged_pano_ids.add(pano0_id)
+            register_pano_heading(logged_pano_headings, pano0_id, head0)
             produced += 1
             continue
 
@@ -532,7 +662,7 @@ def main() -> None:
                 pitch0, date0, status, address,
                 attempts=1, detected=detected0, conf=conf0, pano_rank=1, pair="",
             )
-            logged_pano_ids.add(pano0_id)
+            register_pano_heading(logged_pano_headings, pano0_id, head0)
             produced += 1
             continue
 
@@ -547,7 +677,7 @@ def main() -> None:
                 pitch0, date0, status, address,
                 attempts=1, detected=detected0, conf=conf0, pano_rank=1, pair="",
             )
-            logged_pano_ids.add(pano0_id)
+            register_pano_heading(logged_pano_headings, pano0_id, head0)
             produced += 1
             continue
 
@@ -569,7 +699,7 @@ def main() -> None:
                 pitch0, date0, status, address,
                 attempts=1, detected=detected0, conf=conf0, pano_rank=1, pair="",
             )
-            logged_pano_ids.add(pano0_id)
+            register_pano_heading(logged_pano_headings, pano0_id, head0)
             produced += 1
             continue
         fetched += 1
@@ -588,8 +718,8 @@ def main() -> None:
             pitch1, date1, status, address,
             attempts=2, detected=detected1, conf=conf1, pano_rank=2, pair=filename,
         )
-        logged_pano_ids.add(pano0_id)
-        logged_pano_ids.add(pano1_id)
+        register_pano_heading(logged_pano_headings, pano0_id, head0)
+        register_pano_heading(logged_pano_headings, pano1_id, head1)
         produced += 2
 
     if log:

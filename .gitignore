@@ -16,6 +16,7 @@ data/annotated_seg/
 data/pointclouds/
 data/*.csv
 data/*.zip
+/*.zip
 data/hentesteder_chunks/
 
 outputs/

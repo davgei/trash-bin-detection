@@ -12,7 +12,8 @@ Phase A — manual mode (no model needed):
     q          : save current boxes and quit
 
 Phase B — assisted mode (requires a trained YOLO model):
-    YOLO proposes bounding boxes (shown in gold).
+    YOLO proposes trash_bin boxes (gold, labelled "bin"). If the model also has a
+    ground class (the seg model), those proposals are filtered out — only bins show.
     a / Enter  : accept proposals and move to next image
                  (if YOLO proposes nothing: confirms the image has no trash bins)
     b          : mark image as background — no trash bin present (saves empty label)
@@ -133,9 +134,9 @@ class _DrawState:
         frame = self.image.copy()
         px, py = self._pad_x, self._pad_y
         if proposals:
-            for x1, y1, x2, y2 in proposals:  # already in padded canvas coords
+            for x1, y1, x2, y2 in proposals:  # already in padded canvas coords; bin only
                 cv2.rectangle(frame, (x1, y1), (x2, y2), _COLOR_PROPOSAL, 2)
-                cv2.putText(frame, "YOLO", (x1, max(y1 - 6, py + 14)),
+                cv2.putText(frame, "bin", (x1, max(y1 - 6, py + 14)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, _COLOR_PROPOSAL, 1)
         for x1, y1, x2, y2 in self.boxes:  # stored without padding → add it back
             cv2.rectangle(frame, (x1+px, y1+py), (x2+px, y2+py), (0, 0, 0), 4)
@@ -422,8 +423,11 @@ def main() -> None:
         else:
             yolo_out = model.predict(image, conf=args.conf, verbose=False)
             proposals: list[tuple[int, int, int, int]] = []
-            if yolo_out and yolo_out[0].boxes is not None:
-                for xyxy in yolo_out[0].boxes.xyxy.tolist():
+            boxes = yolo_out[0].boxes if yolo_out else None
+            if boxes is not None:
+                for cls, xyxy in zip(boxes.cls.tolist(), boxes.xyxy.tolist()):
+                    if int(cls) != CLASS_ID:  # seg-modellen foreslår også ground (klasse 1); vis kun bin
+                        continue
                     proposals.append((int(xyxy[0]), int(xyxy[1]),
                                       int(xyxy[2]), int(xyxy[3])))
             result = _run_assisted(image_path, image, proposals, stats)

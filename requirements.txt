@@ -5,3 +5,5 @@ opencv-python       # image display, drawing, and video frame extraction
 ultralytics         # YOLO model training and inference
 numpy               # array operations (pulled in by opencv and ultralytics)
 requests            # HTTP calls to Google Maps API (fetch_streetview.py)
+torch               # depth model + YOLO backend (estimate_bin_positions.py)
+transformers        # Depth Anything V2 metric model (estimate_bin_positions.py)
