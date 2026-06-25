@@ -5,6 +5,29 @@ Alt kjøres fra prosjektroten med `py -3.14` (pakkene ligger i global Python 3.1
 
 ---
 
+## Oversikt — alle steg på én linje (standup)
+
+Hele kjeden, ett steg per rad. Detaljer og flagg står i seksjonen med samme nummer lenger ned.
+
+| # | Steg | Kommando |
+|---|------|----------|
+| 0 | API-nøkkel (per terminal) | `$env:GOOGLE_MAPS_API_KEY = "din-nøkkel"` |
+| 1 | Hent bilder fra kasse-CSV | `py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv` |
+| 2 | Hent fra adresse/koordinat | `py -3.14 -m src.fetch_streetview` |
+| 3 | Annoter (tegn kasse-bokser) | `py -3.14 -m src.labeling.annotate --mode assisted --model models/trained/colab_seg/weights/best.pt` |
+| 3.5 | Seg-datasett: bokser→masker (batch) | `py -3.14 -m src.labeling.sam2_seg_autolabel` |
+| 3.6 | Seg-datasett: interaktiv gjennomgang | `py -3.14 -m src.labeling.sam2_seg_review` |
+| 4 | Bygg om train/val/test-splitt | `py -3.14 -m src.prepare_dataset` |
+| 5 | Tren boks-modell | `py -3.14 -m src.train --name run4` |
+| 5.5 | Tren seg-modell (Colab/GPU) | `py -3.14 -m src.train_seg --name seg2` |
+| 6 | Evaluer på test-splitt | `py -3.14 -m src.evaluate --model <vekter>` |
+| 7 | Statistikk: treff på andre forsøk | `py -3.14 -m src.streetview_stats` |
+| 8 | Estimer GPS-posisjon til kasser | `py -3.14 -m src.estimate_bin_positions --images data/annotated_seg/images` |
+
+**Aktiv lærings-loop:** 1 → 3 → 3.5 → 4 → 5.5 → tilbake til 1. Seg-modellen er den vi trener nå (klasse 0 = kasse, 1 = bakke); steg 8 bruker den til å regne ut hvor kassene står.
+
+---
+
 ## Hurtigstart — vanlige kommandoer
 
 Kopier og lim inn. Sett API-nøkkelen først (én gang per terminal-økt):
@@ -388,13 +411,60 @@ fasit, og scriptet rapporterer median/snitt avvik. På testkjøring ga `ground`
 
 ---
 
-## Typisk arbeidsflyt (aktiv læring)
+## Hele pipelinen — fetch → train → posisjon
 
+Slik henger stegene sammen, fra rå CSV til estimert kasse-koordinat. Modellen vi
+trener nå er **seg-modellen** (klasser: 0 kasse, 1 bakke); den gamle boks-modellen
+er frosset. Mennesket tegner fortsatt bare **bokser** rundt kassene — SAM2 gjør
+boksene om til masker automatisk, så annoteringen er like enkel som før.
+
+Dataflyt mellom mappene:
 ```
-1. Hent bilder        →  fetch_streetview_from_csv  (eller fetch_streetview)
-2. Annoter            →  annotate --mode assisted --model <beste vekter>
-3. (Splittes om automatisk ved slutten av annoteringsøkten)
-4. Tren              →  train   (gjerne på Colab med GPU)
-5. Evaluer           →  evaluate
-6. Gjenta — hvert steg gir bedre forslag i annoteringen
+hentesteder.csv ─► [fetch] ─► data/to_annotate/ ─► [annotate: bokser] ─► data/annotated_backup/ (pool)
+                                                                              │
+                                                              [prepare_dataset: split]
+                                                                              ▼
+                                              data/annotated/ ─► [sam2 seg: bokser→masker] ─► data/annotated_seg/
+                                                                                                      │
+                                                                                          [train_seg på Colab/GPU]
+                                                                                                      ▼
+                                                                              runs/segment/.../best.pt  ─►  [estimate_bin_positions]
 ```
+
+Stegene som kommandoer:
+```powershell
+# 0. (én gang) Del kasse-CSV i biter à 1000 hentesteder
+py -3.14 -m src.split_hentesteder
+
+# 1. HENT — seg-modellen avgjør om bildet har kasse; synlighetsfilter + pano-dedup.
+#    Bilder lagres i data/to_annotate/, kameradata logges til data/streetview_log.csv
+py -3.14 -m src.fetch_streetview_from_csv --csv data/hentesteder_chunks/hentesteder_001.csv
+
+# 2. (valgfritt) TRIAGE — sorter hentede bilder i has_bins / no_bins for rask sjekk
+py -3.14 -m src.sort_by_detection --images data/to_annotate
+
+# 3. ANNOTER — tegn kasse-bokser (forslag fra seg-modellen, kun klasse 0).
+#    Ved øktslutt: eksporter til pool (annotated_backup/) og bygg om data/annotated/
+py -3.14 -m src.labeling.annotate --mode assisted --model models/trained/colab_seg/weights/best.pt
+
+# 4. SPLITT — bygg om train/val/test fra poolen (kjøres normalt automatisk i steg 3)
+py -3.14 -m src.prepare_dataset
+
+# 5. SEG-LABELS — gjør bokser om til masker (SAM2) + legg til bakke-klasse (ADE20K).
+#    Speiler splitten fra data/annotated/ nøyaktig. Batch eller interaktiv gjennomgang:
+py -3.14 -m src.labeling.sam2_seg_autolabel          # batch, ingen klikk
+py -3.14 -m src.labeling.sam2_seg_review             # godkjenn ett bilde om gangen
+
+# 6. TREN seg-modellen (helst på Colab med GPU) → runs/segment/.../best.pt
+py -3.14 -m src.train_seg --epochs 100 --name seg2
+
+# 7. EVALUER på test-splitten
+py -3.14 -m src.evaluate --model runs/segment/models/trained/seg2/weights/best.pt
+
+# 8. POSISJON — projiser detekterte kasser til lat/lng → outputs/bin_positions/
+py -3.14 -m src.estimate_bin_positions --images data/annotated_seg/images
+```
+
+**Aktiv lærings-loopen** er steg 1 → 6: en bedre seg-modell gir både færre
+bom-bilder i fetch (steg 1) og bedre boks-forslag i annoteringen (steg 3), så hver
+runde krever mindre manuelt arbeid. Gjenta til forslagene sjelden må rettes.

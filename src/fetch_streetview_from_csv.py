@@ -317,7 +317,7 @@ def streetview_metadata(lat: float, lng: float, api_key: str,
         "source": "outdoor",
         "key": api_key,
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=15)
     response.raise_for_status()
     return response.json()
 
@@ -335,7 +335,7 @@ def fetch_streetview_by_pano(pano_id: str, heading: float, pitch: float,
         "source": "outdoor",
         "key": api_key,
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=15)
     response.raise_for_status()
     output_path.write_bytes(response.content)
 
